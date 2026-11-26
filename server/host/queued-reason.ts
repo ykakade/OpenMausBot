@@ -10,6 +10,8 @@ export interface QueuedReasonDeps {
   slots(botId: string): { busy: { threadId: string; title: string }[]; limit: number };
   groupTurn(botId: string): boolean;
   behindPerson(node: HandoffView): { kind: PersonWaitKind; title: string } | undefined;
+  /** What holds a room's handoff: a turn on its room thread, with who speaks there when someone does, or its member's turn elsewhere. */
+  roomHold(node: HandoffView): { on: "thread"; speaker?: string } | { on: "member" } | undefined;
 }
 
 /** `showTitle`: name the busy threads it allows; only for the receiver itself, whose own threads they are. Otherwise just the count. */
@@ -17,10 +19,9 @@ export function createQueuedReason(deps: QueuedReasonDeps) {
   return (node: HandoffView, showTitle?: (threadId: string) => boolean): string => {
     const card = deps.behindPerson(node);
     if (card) return `waiting for a free slot: that teammate is waiting on the person's ${card.kind === "question" ? "answer" : card.kind} in its thread ${JSON.stringify(card.title)}; tell the person to open it`;
-    // A room's handoff waits on the room, not on these.
-    if (node.groupId) return "waiting for that teammate to be free";
     const name = deps.botName(node.botId) ?? "that teammate";
     if (deps.waitsForComputer(node)) return "waiting for the computer it needs, which another turn or a person is using";
+    if (node.groupId) return roomReason(deps.roomHold(node), name, () => deps.groupTurn(node.botId));
     if (deps.threadBusy(node.botId, node.threadId)) return "waiting for an earlier turn in that thread to finish";
     const { busy, limit } = deps.slots(node.botId);
     if (busy.length >= limit) {
@@ -31,4 +32,10 @@ export function createQueuedReason(deps: QueuedReasonDeps) {
     if (deps.groupTurn(node.botId)) return `waiting for ${name} to finish its turn in a room`;
     return "waiting for that teammate to be free";
   };
+}
+
+function roomReason(hold: ReturnType<QueuedReasonDeps["roomHold"]>, name: string, inRoom: () => boolean): string {
+  if (hold?.on === "thread") return hold.speaker ? `waiting for ${hold.speaker} to finish speaking in that room thread` : "waiting for the turn already running in that room thread to finish";
+  if (hold?.on === "member") return inRoom() ? `waiting for ${name} to finish its turn in a room` : `waiting for ${name} to finish its turn in another thread`;
+  return "waiting for that teammate to be free";
 }

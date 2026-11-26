@@ -303,6 +303,7 @@ import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPos
 import { messagePages, pageMessage, pageSize, slimMessage } from "./host/message-pages.ts"; import { SUGGESTION_MAX_AGE_MS, suggestedSelection } from "./host/suggested-selection.ts"; import { otherProviderSelection } from "./checker-model.ts"; import { checkWorkFile, createCheckWork } from "./host/check-work.ts";
 import { coordinateResultMessage, createAsksActingPerson, createTeammatePrompts } from "./host/teammate-prompts.ts"; import { createPersonalReach } from "./host/personal-reach.ts"; import { createMausBotOwnChat } from "./host/mausbot-own-chat.ts"; import { moveMemoryLayer } from "./memory-move.ts";
 import { createQueuedReason } from "./host/queued-reason.ts";
+import { createRoomThreadWorking, type RoomSpeaker } from "./host/room-speakers.ts";
 import { ReplayBuffer } from "./host/sse-replay.ts";
 import {
   mentionedBots,
@@ -3469,7 +3470,7 @@ type GroupTurnOperation = {
 
 // Wider than busyBotId (setup and queued responders too), so polling clients never mistake a handoff for completion.
 const groupTurnOperations = new Map<string, Set<GroupTurnOperation>>();
-const groupSpeakers = new Map<string, { botId: string; name: string; color: string; since?: number }>();
+const groupSpeakers = new Map<string, RoomSpeaker>();
 const roomMemberContexts = new RoomContextTracker({
   heldUntil: (threadId) => cacheKeepWarmStatus(threadId)?.until,
   expired: (threadId) => { const room = store.groupByThread(threadId); if (room) broadcast({ kind: "group", group: publicGroupState(room) }); },
@@ -3477,15 +3478,9 @@ const roomMemberContexts = new RoomContextTracker({
 /** Holds a member for the thread it was handed to until that turn marks the bot busy. */
 const roomMemberLock = new RoomMemberLock();
 
+const roomThreadWorking = createRoomThreadWorking({ speakers: groupSpeakers, operation: (groupId, threadId) => [...(groupTurnOperations.get(groupId) ?? [])].some((op) => !op.cancelled && op.threadId === threadId), engineTurn: (threadId) => runningTurnEngines.has(threadId) || liveTurns.running(threadId) !== undefined || settlingTurns.has(threadId), botBusy: (botId) => Boolean(store.bot(botId)?.busy), cleared: (groupId) => { store.patchGroup(groupId, { busyBotId: activeGroupSpeaker(groupId)?.botId ?? null }); }, log: (line) => console.warn(line) });
 function groupThreadIsWorking(groupId: string, threadId: string): boolean {
-  if (groupSpeakers.has(threadId)) return true;
-  const activeOps = groupTurnOperations.get(groupId);
-  if (activeOps) {
-    for (const op of activeOps) {
-      if (!op.cancelled && op.threadId === threadId) return true;
-    }
-  }
-  return false;
+  return roomThreadWorking(groupId, threadId);
 }
 
 function activeGroupSpeaker(groupId: string): { botId: string; name: string; color: string } | undefined {
@@ -3704,7 +3699,7 @@ function coordinationSystemInstructions(): string {
 }
 
 const threadReadableFrom = (threadId: string) => (other: string): boolean => !proactive.fence.confines(other) && !botApiThread(other) && (CLOUD_TEAM ? teamHost.readableFrom(threadId)(other) : !CLOUD_HOME || cloudOwnerOnlyThread(other));
-const queuedDeps = { botName: (id: string) => store.bot(id)?.name, threadBusy, groupTurn: (id: string) => Boolean(activeGroupTurnForBot(id)), behindPerson: queuedBehindPerson,
+const queuedDeps = { botName: (id: string) => store.bot(id)?.name, threadBusy, groupTurn: (id: string) => Boolean(activeGroupTurnForBot(id)), behindPerson: queuedBehindPerson, roomHold: (node: HandoffView) => { if (node.groupId && groupThreadIsWorking(node.groupId, node.threadId)) { const speaker = groupSpeakers.get(node.threadId)?.name; return { on: "thread" as const, ...(speaker ? { speaker } : {}) }; } return store.bot(node.botId)?.busy ? { on: "member" as const } : undefined; },
   waitsForComputer: (node: HandoffView) => parkedSeatTaken(node.id),
   slots: (id: string) => ({ busy: store.tasks(id).filter((task) => threadBusy(id, task.threadId)).map(({ threadId, title }) => ({ threadId, title })), limit: maxConcurrentChildThreads(cfg, botThreadsHost(cloudPlanTier.starter())) }) }; const queuedStatus = createQueuedReason(queuedDeps), queuedNotes = createQueuedNotes({ ...queuedDeps, now: Date.now, language: (threadId) => threadLanguage(threadId), parent: (node) => node.parentId ? coordinator.node(node.parentId) : undefined, node: (id) => coordinator.node(id), post: (parent, node, line) => { const bot = store.bot(node.botId), title = store.taskByThread(node.botId, node.threadId)?.title; store.appendMessage(parent.threadId, { role: "bot", kind: "activity", ...(bot ? { from: { botId: bot.id, name: bot.name, color: bot.color } } : {}), tool: { name: line, ok: true }, ...(title ? { threadRef: { botId: node.botId, threadId: node.threadId, title } } : {}) }); } });
 const asksActingPerson = createAsksActingPerson({ team: Boolean(CLOUD_TEAM), requester: (threadId, generation) => actingPeople.requester(threadId, generation), askedPerson: (botId, threadId) => teamOwners.routing.askedPerson(botId, threadId) });
